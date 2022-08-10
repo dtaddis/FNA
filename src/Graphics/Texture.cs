@@ -1,6 +1,6 @@
 #region License
 /* FNA - XNA4 Reimplementation for Desktop Platforms
- * Copyright 2009-2021 Ethan Lee and the MonoGame Team
+ * Copyright 2009-2022 Ethan Lee and the MonoGame Team
  *
  * Released under the Microsoft Public License.
  * See LICENSE for details.
@@ -67,6 +67,42 @@ namespace Microsoft.Xna.Framework.Graphics
 
 		#region Static SurfaceFormat Size Methods
 
+		protected static int GetBlockSizeSquared(SurfaceFormat format)
+		{
+			switch (format)
+			{
+				case SurfaceFormat.Dxt1:
+				case SurfaceFormat.Dxt3:
+				case SurfaceFormat.Dxt5:
+				case SurfaceFormat.Dxt5SrgbEXT:
+				case SurfaceFormat.Bc7EXT:
+				case SurfaceFormat.Bc7SrgbEXT:
+					return 16;
+				case SurfaceFormat.Alpha8:
+				case SurfaceFormat.Bgr565:
+				case SurfaceFormat.Bgra4444:
+				case SurfaceFormat.Bgra5551:
+				case SurfaceFormat.HalfSingle:
+				case SurfaceFormat.NormalizedByte2:
+				case SurfaceFormat.Color:
+				case SurfaceFormat.Single:
+				case SurfaceFormat.Rg32:
+				case SurfaceFormat.HalfVector2:
+				case SurfaceFormat.NormalizedByte4:
+				case SurfaceFormat.Rgba1010102:
+				case SurfaceFormat.ColorBgraEXT:
+				case SurfaceFormat.ColorSrgbEXT:
+				case SurfaceFormat.HalfVector4:
+				case SurfaceFormat.Rgba64:
+				case SurfaceFormat.Vector2:
+				case SurfaceFormat.HdrBlendable:
+				case SurfaceFormat.Vector4:
+					return 1;
+				default:
+					throw new ArgumentException("Should be a value defined in SurfaceFormat", "Format");
+			}
+		}
+
 		internal static int GetFormatSize(SurfaceFormat format)
 		{
 			switch (format)
@@ -75,6 +111,9 @@ namespace Microsoft.Xna.Framework.Graphics
 					return 8;
 				case SurfaceFormat.Dxt3:
 				case SurfaceFormat.Dxt5:
+				case SurfaceFormat.Dxt5SrgbEXT:
+				case SurfaceFormat.Bc7EXT:
+				case SurfaceFormat.Bc7SrgbEXT:
 					return 16;
 				case SurfaceFormat.Alpha8:
 					return 1;
@@ -91,6 +130,7 @@ namespace Microsoft.Xna.Framework.Graphics
 				case SurfaceFormat.NormalizedByte4:
 				case SurfaceFormat.Rgba1010102:
 				case SurfaceFormat.ColorBgraEXT:
+				case SurfaceFormat.ColorSrgbEXT:
 					return 4;
 				case SurfaceFormat.HalfVector4:
 				case SurfaceFormat.Rgba64:
@@ -104,7 +144,7 @@ namespace Microsoft.Xna.Framework.Graphics
 			}
 		}
 
-		internal static int GetPixelStoreAlignment(SurfaceFormat format) 
+		internal static int GetPixelStoreAlignment(SurfaceFormat format)
 		{
 			/*
 			 * https://github.com/FNA-XNA/FNA/pull/238
@@ -152,6 +192,40 @@ namespace Microsoft.Xna.Framework.Graphics
 
 		#region Static DDS Parser
 
+		internal static int CalculateDDSLevelSize(
+			int width,
+			int height,
+			SurfaceFormat format
+		) {
+			if (format == SurfaceFormat.ColorBgraEXT)
+			{
+				return (((width * 32) + 7) / 8) * height;
+			}
+			else if (format == SurfaceFormat.HalfVector4)
+			{
+				return (((width * 64) + 7) / 8) * height;
+			}
+			else if (format == SurfaceFormat.Vector4)
+			{
+				return (((width * 128) + 7) / 8) * height;
+			}
+			else
+			{
+				int blockSize = 16;
+				if (format == SurfaceFormat.Dxt1)
+				{
+					blockSize = 8;
+				}
+				width = Math.Max(width, 1);
+				height = Math.Max(height, 1);
+				return (
+					((width + 3) / 4) *
+					((height + 3) / 4) *
+					blockSize
+				);
+			}
+		}
+
 		// DDS loading extension, based on MojoDDS
 		internal static void ParseDDS(
 			BinaryReader reader,
@@ -159,8 +233,7 @@ namespace Microsoft.Xna.Framework.Graphics
 			out int width,
 			out int height,
 			out int levels,
-			out int levelSize,
-			out int blockSize
+			out bool isCube
 		) {
 			// A whole bunch of magic numbers, yay DDS!
 			const uint DDS_MAGIC = 0x20534444;
@@ -183,7 +256,7 @@ namespace Microsoft.Xna.Framework.Graphics
 			const uint FOURCC_DXT1 = 0x31545844;
 			const uint FOURCC_DXT3 = 0x33545844;
 			const uint FOURCC_DXT5 = 0x35545844;
-			// const uint FOURCC_DX10 = 0x30315844;
+			const uint FOURCC_DX10 = 0x30315844;
 			const uint pitchAndLinear = (
 				DDSD_PITCH | DDSD_LINEARSIZE
 			);
@@ -238,12 +311,22 @@ namespace Microsoft.Xna.Framework.Graphics
 			{
 				throw new NotSupportedException("Not a texture!");
 			}
+
+			isCube = false;
+
 			uint caps2 = reader.ReadUInt32();
-			if (	caps2 != 0 &&
-				(caps2 & DDSCAPS2_CUBEMAP) != DDSCAPS2_CUBEMAP	)
+			if (caps2 != 0)
 			{
-				throw new NotSupportedException("Invalid caps2!");
+				if ((caps2 & DDSCAPS2_CUBEMAP) == DDSCAPS2_CUBEMAP)
+				{
+					isCube = true;
+				}
+				else
+				{
+					throw new NotSupportedException("Invalid caps2!");
+				}
 			}
+
 			reader.ReadUInt32(); // dwCaps3, unused
 			reader.ReadUInt32(); // dwCaps4, unused
 
@@ -257,34 +340,107 @@ namespace Microsoft.Xna.Framework.Graphics
 			}
 
 			// Determine texture format
-			blockSize = 0;
 			if ((formatFlags & DDPF_FOURCC) == DDPF_FOURCC)
 			{
-				if (formatFourCC == FOURCC_DXT1)
+				switch (formatFourCC)
 				{
-					format = SurfaceFormat.Dxt1;
-					blockSize = 8;
+					case 0x71: // D3DFMT_A16B16G16R16F
+						format = SurfaceFormat.HalfVector4;
+						break;
+					case 0x74: // D3DFMT_A32B32G32R32F
+						format = SurfaceFormat.Vector4;
+						break;
+					case FOURCC_DXT1:
+						format = SurfaceFormat.Dxt1;
+						break;
+					case FOURCC_DXT3:
+						format = SurfaceFormat.Dxt3;
+						break;
+					case FOURCC_DXT5:
+						format = SurfaceFormat.Dxt5;
+						break;
+					case FOURCC_DX10:
+						// If the fourCC is DX10, there is an extra header with additional format information.
+						uint dxgiFormat = reader.ReadUInt32();
+
+						// These values are taken from the DXGI_FORMAT enum.
+						switch (dxgiFormat)
+						{
+							case 2:
+								format = SurfaceFormat.Vector4;
+								break;
+
+							case 10:
+								format = SurfaceFormat.HalfVector4;
+								break;
+
+							case 71:
+								format = SurfaceFormat.Dxt1;
+								break;
+
+							case 74:
+								format = SurfaceFormat.Dxt3;
+								break;
+
+							case 77:
+								format = SurfaceFormat.Dxt5;
+								break;
+
+							case 98:
+								format = SurfaceFormat.Bc7EXT;
+								break;
+
+							case 99:
+								format = SurfaceFormat.Bc7SrgbEXT;
+								break;
+
+							default:
+								throw new NotSupportedException(
+									"Unsupported DDS texture format"
+								);
+						}
+
+						uint resourceDimension = reader.ReadUInt32();
+
+						// These values are taken from the D3D10_RESOURCE_DIMENSION enum.
+						switch (resourceDimension)
+						{
+							case 0: // Unknown
+							case 1: // Buffer
+								throw new NotSupportedException(
+									"Unsupported DDS texture format"
+								);
+							default:
+								break;
+						}
+
+						/*
+						 * This flag seemingly only indicates if the texture is a cube map.
+						 * This is already determined above. Cool!
+						 */
+						reader.ReadUInt32();
+
+						/*
+						 * Indicates the number of elements in the texture array.
+						 * We don't support texture arrays so just throw if it's greater than 1.
+						 */
+						uint arraySize = reader.ReadUInt32();
+
+						if (arraySize > 1)
+						{
+							throw new NotSupportedException(
+								"Unsupported DDS texture format"
+							);
+						}
+
+						reader.ReadUInt32(); // reserved
+
+						break;
+					default:
+						throw new NotSupportedException(
+							"Unsupported DDS texture format"
+						);
 				}
-				else if (formatFourCC == FOURCC_DXT3)
-				{
-					format = SurfaceFormat.Dxt3;
-					blockSize = 16;
-				}
-				else if (formatFourCC == FOURCC_DXT5)
-				{
-					format = SurfaceFormat.Dxt5;
-					blockSize = 16;
-				}
-				else
-				{
-					throw new NotSupportedException(
-						"Unsupported DDS texture format"
-					);
-				}
-				levelSize = (
-					((width > 0 ? ((width + 3) / 4) : 1) * blockSize) *
-					(height > 0 ? ((height + 3) / 4) : 1)
-				);
 			}
 			else if ((formatFlags & DDPF_RGB) == DDPF_RGB)
 			{
@@ -300,10 +456,6 @@ namespace Microsoft.Xna.Framework.Graphics
 				}
 
 				format = SurfaceFormat.ColorBgraEXT;
-				levelSize = (int) (
-					(((width * formatRGBBitCount) + 7) / 8) *
-					height
-				);
 			}
 			else
 			{

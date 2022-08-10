@@ -1,6 +1,6 @@
 #region License
 /* FNA - XNA4 Reimplementation for Desktop Platforms
- * Copyright 2009-2021 Ethan Lee and the MonoGame Team
+ * Copyright 2009-2022 Ethan Lee and the MonoGame Team
  *
  * Released under the Microsoft Public License.
  * See LICENSE for details.
@@ -74,20 +74,39 @@ namespace Microsoft.Xna.Framework.Graphics
 			LevelCount = mipMap ? CalculateMipLevels(width, height) : 1;
 
 			// TODO: Use QueryRenderTargetFormat!
-			if (	this is IRenderTarget &&
-				format != SurfaceFormat.Color &&
-				format != SurfaceFormat.Rgba1010102 &&
-				format != SurfaceFormat.Rg32 &&
-				format != SurfaceFormat.Rgba64 &&
-				format != SurfaceFormat.Single &&
-				format != SurfaceFormat.Vector2 &&
-				format != SurfaceFormat.Vector4 &&
-				format != SurfaceFormat.HalfSingle &&
-				format != SurfaceFormat.HalfVector2 &&
-				format != SurfaceFormat.HalfVector4 &&
-				format != SurfaceFormat.HdrBlendable	)
+			if (this is IRenderTarget)
 			{
-				Format = SurfaceFormat.Color;
+				if (format == SurfaceFormat.ColorSrgbEXT)
+				{
+					if (FNA3D.FNA3D_SupportsSRGBRenderTargets(GraphicsDevice.GLDevice) == 0)
+					{
+						// Renderable but not on this device
+						Format = SurfaceFormat.Color;
+					}
+					else
+					{
+						Format = format;
+					}
+				}
+				else if (	format != SurfaceFormat.Color &&
+						format != SurfaceFormat.Rgba1010102 &&
+						format != SurfaceFormat.Rg32 &&
+						format != SurfaceFormat.Rgba64 &&
+						format != SurfaceFormat.Single &&
+						format != SurfaceFormat.Vector2 &&
+						format != SurfaceFormat.Vector4 &&
+						format != SurfaceFormat.HalfSingle &&
+						format != SurfaceFormat.HalfVector2 &&
+						format != SurfaceFormat.HalfVector4 &&
+						format != SurfaceFormat.HdrBlendable	)
+				{
+					// Not a renderable format period
+					Format = SurfaceFormat.Color;
+				}
+				else
+				{
+					Format = format;
+				}
 			}
 			else
 			{
@@ -144,6 +163,14 @@ namespace Microsoft.Xna.Framework.Graphics
 			{
 				throw new ArgumentNullException("data");
 			}
+			if (startIndex < 0)
+			{
+				throw new ArgumentOutOfRangeException("startIndex");
+			}
+			if (data.Length < (elementCount + startIndex))
+			{
+				throw new ArgumentOutOfRangeException("elementCount");
+			}
 
 			int x, y, w, h;
 			if (rect.HasValue)
@@ -161,6 +188,13 @@ namespace Microsoft.Xna.Framework.Graphics
 				h = Math.Max(Height >> level, 1);
 			}
 			int elementSize = Marshal.SizeOf(typeof(T));
+			int requiredBytes = (w * h * GetFormatSize(Format)) / GetBlockSizeSquared(Format);
+			int availableBytes = elementCount * elementSize;
+			if (requiredBytes > availableBytes)
+			{
+				throw new ArgumentOutOfRangeException("rect", "The region you are trying to upload is larger than the amount of data you provided.");
+			}
+
 			GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
 			FNA3D.FNA3D_SetTextureData2D(
 				GraphicsDevice.GLDevice,
@@ -437,7 +471,7 @@ namespace Microsoft.Xna.Framework.Graphics
 		#endregion
 
 		#region Public Static Texture2D Extensions
-		
+
 		/// <summary>
 		/// Loads image data from a given stream.
 		/// </summary>
@@ -494,7 +528,8 @@ namespace Microsoft.Xna.Framework.Graphics
 			using (BinaryReader reader = new BinaryReader(stream))
 			{
 
-			int width, height, levels, levelSize, blockSize;
+			int width, height, levels;
+			bool isCube;
 			SurfaceFormat format;
 			Texture.ParseDDS(
 				reader,
@@ -502,9 +537,13 @@ namespace Microsoft.Xna.Framework.Graphics
 				out width,
 				out height,
 				out levels,
-				out levelSize,
-				out blockSize
+				out isCube
 			);
+
+			if (isCube)
+			{
+				throw new FormatException("This file contains cube map data!");
+			}
 
 			// Allocate/Load texture
 			result = new Texture2D(
@@ -521,6 +560,11 @@ namespace Microsoft.Xna.Framework.Graphics
 			{
 				for (int i = 0; i < levels; i += 1)
 				{
+					int levelSize = Texture.CalculateDDSLevelSize(
+						width >> i,
+						height >> i,
+						format
+					);
 					result.SetData(
 						i,
 						null,
@@ -532,27 +576,23 @@ namespace Microsoft.Xna.Framework.Graphics
 						levelSize,
 						SeekOrigin.Current
 					);
-					levelSize = Math.Max(
-						levelSize >> 2,
-						blockSize
-					);
 				}
 			}
 			else
 			{
 				for (int i = 0; i < levels; i += 1)
 				{
-					tex = reader.ReadBytes(levelSize);
+					tex = reader.ReadBytes(Texture.CalculateDDSLevelSize(
+						width >> i,
+						height >> i,
+						format
+					));
 					result.SetData(
 						i,
 						null,
 						tex,
 						0,
 						tex.Length
-					);
-					levelSize = Math.Max(
-						levelSize >> 2,
-						blockSize
 					);
 				}
 			}
